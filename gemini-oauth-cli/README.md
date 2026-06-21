@@ -24,6 +24,7 @@ albo `claude`).
 - ✅ **Poziom myślenia** (`--thinking`) + podgląd toku rozumowania (`--show-thoughts`)
 - ✅ Streaming odpowiedzi (SSE) oraz tryb pipe (stdin) „jak API”
 - ✅ Interaktywny czat z pamięcią kontekstu i dołączaniem plików
+- ✅ **Gemy** — lokalne, nazwane persony (instrukcja + domyślny model/temperatura/myślenie/provider)
 - ❌ Deep Research — funkcja aplikacji webowych, niedostępna przez te endpointy
 
 ## Jak to działa
@@ -112,6 +113,34 @@ gemini -p claude chat
 - `/file <ścieżka>` — dołącz plik do następnej wiadomości
 - `/reset` — wyczyść kontekst rozmowy
 - `/exit` lub `/quit` — wyjście
+
+### Gemy (własne persony)
+
+Gem to nazwany zestaw: instrukcja systemowa + opcjonalne domyślne ustawienia
+(model, dostawca, temperatura, myślenie). To lokalny odpowiednik „Gemów” z
+aplikacji Gemini (Twoich Gemów z gemini.google.com **nie da się** pobrać tą
+drogą — żyją w aplikacji webowej za inną autoryzacją).
+
+```bash
+# utwórz gema (instrukcja wprost lub z pliku)
+gemini gem add recenzent \
+  --system "Jesteś surowym recenzentem kodu. Wypunktuj ryzyka i poprawki." \
+  --model gemini-2.5-pro --temperature 0.3 --description "Code review"
+
+gemini gem add tlumacz --system-file ./prompty/tlumacz.txt --provider claude
+
+# lista / szczegóły / usuwanie
+gemini gem list
+gemini gem show recenzent
+gemini gem remove recenzent
+
+# użyj gema (flagi z linii poleceń nadpisują ustawienia gema)
+gemini ask -g recenzent -f main.rs "Sprawdź ten plik"
+gemini chat -g tlumacz
+```
+
+Kolejność ustawień: **flaga CLI > gem > domyślne**. Jeśli gem ma ustawiony
+`provider`, zostanie użyty, o ile nie podasz `-p` jawnie.
 
 ## Zmienne środowiskowe
 

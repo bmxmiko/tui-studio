@@ -11,38 +11,17 @@ mod provider;
 
 use anyhow::{Context, Result};
 use base64::Engine;
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use claude::ClaudeClient;
 use codeassist::CodeAssist;
-use config::Store;
+use config::{Gem, ProviderKind, Store};
 use provider::{Attachment, Client, GenOptions, Message, Role};
 
 const B64: base64::engine::general_purpose::GeneralPurpose =
     base64::engine::general_purpose::STANDARD;
-
-#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum ProviderKind {
-    Gemini,
-    Claude,
-}
-
-impl ProviderKind {
-    fn name(self) -> &'static str {
-        match self {
-            ProviderKind::Gemini => "Gemini",
-            ProviderKind::Claude => "Claude",
-        }
-    }
-    fn default_model(self) -> &'static str {
-        match self {
-            ProviderKind::Gemini => "gemini-2.5-flash",
-            ProviderKind::Claude => "claude-sonnet-4-5",
-        }
-    }
-}
 
 #[derive(Parser)]
 #[command(
@@ -52,8 +31,9 @@ impl ProviderKind {
 )]
 struct Cli {
     /// Wybór dostawcy: gemini (Code Assist) lub claude (Claude Code OAuth).
-    #[arg(short, long, global = true, value_enum, default_value_t = ProviderKind::Gemini)]
-    provider: ProviderKind,
+    /// Domyślnie gemini (chyba że gem wskazuje innego).
+    #[arg(short, long, global = true, value_enum)]
+    provider: Option<ProviderKind>,
     #[command(subcommand)]
     command: Command,
 }
@@ -86,6 +66,9 @@ enum Command {
         /// Instrukcja systemowa.
         #[arg(short, long)]
         system: Option<String>,
+        /// Użyj gema (persony) o tej nazwie jako domyślnych ustawień.
+        #[arg(short = 'g', long)]
+        gem: Option<String>,
         /// Temperatura próbkowania.
         #[arg(short, long)]
         temperature: Option<f32>,
@@ -108,6 +91,9 @@ enum Command {
         model: Option<String>,
         #[arg(short, long)]
         system: Option<String>,
+        /// Użyj gema (persony) o tej nazwie.
+        #[arg(short = 'g', long)]
+        gem: Option<String>,
         #[arg(long, value_name = "TOKENY")]
         thinking: Option<i32>,
         #[arg(long)]
@@ -115,6 +101,47 @@ enum Command {
         #[arg(long, default_value_t = 4096)]
         max_tokens: u32,
     },
+    /// Zarządzaj gemami — własnymi asystentami/personami (instrukcja + domyślne ustawienia).
+    Gem {
+        #[command(subcommand)]
+        action: GemAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum GemAction {
+    /// Dodaj lub nadpisz gema.
+    Add {
+        /// Nazwa gema (identyfikator).
+        name: String,
+        /// Instrukcja systemowa / persona.
+        #[arg(short, long)]
+        system: Option<String>,
+        /// Wczytaj instrukcję systemową z pliku.
+        #[arg(long, value_name = "ŚCIEŻKA")]
+        system_file: Option<PathBuf>,
+        /// Krótki opis.
+        #[arg(short, long)]
+        description: Option<String>,
+        /// Domyślny model.
+        #[arg(short, long)]
+        model: Option<String>,
+        /// Domyślny dostawca (gemini/claude).
+        #[arg(short, long, value_enum)]
+        provider: Option<ProviderKind>,
+        /// Domyślna temperatura.
+        #[arg(short, long)]
+        temperature: Option<f32>,
+        /// Domyślny budżet myślenia.
+        #[arg(long)]
+        thinking: Option<i32>,
+    },
+    /// Wypisz wszystkie gemy.
+    List,
+    /// Pokaż szczegóły gema.
+    Show { name: String },
+    /// Usuń gema.
+    Remove { name: String },
 }
 
 #[tokio::main]
@@ -127,14 +154,15 @@ async fn main() {
 
 async fn run() -> Result<()> {
     let cli = Cli::parse();
-    let provider = cli.provider;
     let mut store = Store::load()?;
 
     match cli.command {
         Command::Login { no_browser, code } => {
+            let provider = cli.provider.unwrap_or_default();
             login(provider, &mut store, no_browser, code).await?
         }
         Command::Logout => {
+            let provider = cli.provider.unwrap_or_default();
             match provider {
                 ProviderKind::Gemini => store.gemini = Default::default(),
                 ProviderKind::Claude => store.claude = Default::default(),
@@ -143,18 +171,31 @@ async fn run() -> Result<()> {
             println!("✓ Wylogowano ({}).", provider.name());
         }
         Command::Status => status(&store),
+        Command::Gem { action } => gem_command(&mut store, action)?,
         Command::Ask {
             prompt,
             model,
             files,
             system,
+            gem,
             temperature,
             thinking,
             show_thoughts,
             max_tokens,
             no_stream,
         } => {
-            let model = model.unwrap_or_else(|| provider.default_model().to_string());
+            let g = lookup_gem(&store, gem.as_deref())?;
+            let provider = cli
+                .provider
+                .or_else(|| g.as_ref().and_then(|g| g.provider))
+                .unwrap_or_default();
+            let model = model
+                .or_else(|| g.as_ref().and_then(|g| g.model.clone()))
+                .unwrap_or_else(|| provider.default_model().to_string());
+            let system = system.or_else(|| g.as_ref().map(|g| g.system.clone()));
+            let temperature = temperature.or_else(|| g.as_ref().and_then(|g| g.temperature));
+            let thinking = thinking.or_else(|| g.as_ref().and_then(|g| g.thinking));
+
             let prompt = resolve_prompt(prompt, files.is_empty())?;
             let attachments = read_attachments(&files)?;
             let msg = Message { role: Role::User, text: prompt, files: attachments };
@@ -164,11 +205,109 @@ async fn run() -> Result<()> {
                 .complete(&model, system.as_deref(), &[msg], &opts, !no_stream)
                 .await?;
         }
-        Command::Chat { model, system, thinking, show_thoughts, max_tokens } => {
-            let model = model.unwrap_or_else(|| provider.default_model().to_string());
+        Command::Chat { model, system, gem, thinking, show_thoughts, max_tokens } => {
+            let g = lookup_gem(&store, gem.as_deref())?;
+            let provider = cli
+                .provider
+                .or_else(|| g.as_ref().and_then(|g| g.provider))
+                .unwrap_or_default();
+            let model = model
+                .or_else(|| g.as_ref().and_then(|g| g.model.clone()))
+                .unwrap_or_else(|| provider.default_model().to_string());
+            let system = system.or_else(|| g.as_ref().map(|g| g.system.clone()));
+            let temperature = g.as_ref().and_then(|g| g.temperature);
+            let thinking = thinking.or_else(|| g.as_ref().and_then(|g| g.thinking));
+
             let client = make_client(provider, &mut store).await?;
-            let opts = GenOptions { temperature: None, thinking, show_thoughts, max_tokens };
+            let opts = GenOptions { temperature, thinking, show_thoughts, max_tokens };
             chat(client, provider, &model, system, &opts).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Look up a gem by name, erroring if a name was given but not found.
+fn lookup_gem(store: &Store, name: Option<&str>) -> Result<Option<Gem>> {
+    match name {
+        None => Ok(None),
+        Some(n) => store
+            .gems
+            .get(n)
+            .cloned()
+            .map(Some)
+            .ok_or_else(|| anyhow::anyhow!("nie ma gema '{n}' (zobacz: gemini gem list)")),
+    }
+}
+
+fn gem_command(store: &mut Store, action: GemAction) -> Result<()> {
+    match action {
+        GemAction::Add {
+            name,
+            system,
+            system_file,
+            description,
+            model,
+            provider,
+            temperature,
+            thinking,
+        } => {
+            let system = match (system, system_file) {
+                (Some(s), _) => s,
+                (None, Some(path)) => std::fs::read_to_string(&path)
+                    .with_context(|| format!("czytanie {}", path.display()))?
+                    .trim()
+                    .to_string(),
+                (None, None) => {
+                    anyhow::bail!("podaj instrukcję systemową: --system \"...\" albo --system-file <plik>")
+                }
+            };
+            anyhow::ensure!(!system.is_empty(), "instrukcja systemowa jest pusta");
+            let existed = store.gems.contains_key(&name);
+            store.gems.insert(
+                name.clone(),
+                Gem { system, description, model, provider, temperature, thinking },
+            );
+            store.save()?;
+            println!("✓ Gem '{name}' {}.", if existed { "zaktualizowany" } else { "dodany" });
+        }
+        GemAction::List => {
+            if store.gems.is_empty() {
+                println!("Brak gemów. Dodaj: gemini gem add <nazwa> --system \"...\"");
+            } else {
+                for (name, g) in &store.gems {
+                    let prov = g.provider.map(|p| p.name()).unwrap_or("-");
+                    let model = g.model.as_deref().unwrap_or("-");
+                    let desc = g.description.as_deref().unwrap_or("");
+                    println!("• {name}  [provider: {prov}, model: {model}]  {desc}");
+                }
+            }
+        }
+        GemAction::Show { name } => {
+            let g = store
+                .gems
+                .get(&name)
+                .ok_or_else(|| anyhow::anyhow!("nie ma gema '{name}'"))?;
+            println!("Gem: {name}");
+            if let Some(d) = &g.description {
+                println!("Opis: {d}");
+            }
+            println!("Dostawca: {}", g.provider.map(|p| p.name()).unwrap_or("(domyślny)"));
+            println!("Model: {}", g.model.as_deref().unwrap_or("(domyślny)"));
+            if let Some(t) = g.temperature {
+                println!("Temperatura: {t}");
+            }
+            if let Some(t) = g.thinking {
+                println!("Myślenie: {t}");
+            }
+            println!("\nInstrukcja systemowa:\n{}", g.system);
+        }
+        GemAction::Remove { name } => {
+            if store.gems.remove(&name).is_some() {
+                store.save()?;
+                println!("✓ Usunięto gema '{name}'.");
+            } else {
+                println!("Nie ma gema '{name}'.");
+            }
         }
     }
     Ok(())

@@ -3,9 +3,52 @@
 //! user's config dir, e.g. `~/.config/gemini-oauth-cli/`.
 
 use anyhow::{Context, Result};
+use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Which backend to talk to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProviderKind {
+    #[default]
+    Gemini,
+    Claude,
+}
+
+impl ProviderKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            ProviderKind::Gemini => "Gemini",
+            ProviderKind::Claude => "Claude",
+        }
+    }
+    pub fn default_model(self) -> &'static str {
+        match self {
+            ProviderKind::Gemini => "gemini-2.5-flash",
+            ProviderKind::Claude => "claude-sonnet-4-5",
+        }
+    }
+}
+
+/// A "Gem": a reusable, named assistant/persona (system instruction plus
+/// optional defaults). Local equivalent of the Gemini app's Gems.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Gem {
+    pub system: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub provider: Option<ProviderKind>,
+    #[serde(default)]
+    pub temperature: Option<f32>,
+    #[serde(default)]
+    pub thinking: Option<i32>,
+}
 
 /// Persisted OAuth tokens. Shared shape across providers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,6 +97,9 @@ pub struct Store {
     pub gemini: ProviderStore,
     #[serde(default)]
     pub claude: ProviderStore,
+    /// User-defined Gems (personas), keyed by name.
+    #[serde(default)]
+    pub gems: BTreeMap<String, Gem>,
 }
 
 /// Extract an authorization `code` (and optional `state`) from whatever the
