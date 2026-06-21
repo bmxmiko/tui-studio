@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::io::Write;
 
-use crate::config::{now_secs, Credentials, Store};
+use crate::config::{extract_code, now_secs, Credentials, PendingAuth, Store};
 use crate::provider::{GenOptions, Message, Role};
 
 // Public Claude Code OAuth client — embedded in a distributed app, only grants
@@ -51,45 +51,66 @@ fn pkce() -> (String, String) {
     (verifier, challenge)
 }
 
-pub async fn login(store: &mut Store) -> Result<()> {
-    let (verifier, challenge) = pkce();
-    let state = random_b64url(24);
-
+fn build_authorize_url(challenge: &str, state: &str) -> String {
     let query = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("code", "true")
         .append_pair("client_id", CLIENT_ID)
         .append_pair("response_type", "code")
         .append_pair("redirect_uri", REDIRECT_URI)
         .append_pair("scope", SCOPES)
-        .append_pair("code_challenge", &challenge)
+        .append_pair("code_challenge", challenge)
         .append_pair("code_challenge_method", "S256")
-        .append_pair("state", &state)
+        .append_pair("state", state)
         .finish();
-    let auth_url = format!("{AUTHORIZE_URL}?{query}");
+    format!("{AUTHORIZE_URL}?{query}")
+}
 
+/// Headless step 1: generate the auth URL and stash the pending PKCE state.
+pub fn start_headless(store: &mut Store) -> Result<String> {
+    let (verifier, challenge) = pkce();
+    let state = random_b64url(24);
+    let auth_url = build_authorize_url(&challenge, &state);
+    store.claude.pending = Some(PendingAuth {
+        verifier,
+        state,
+        redirect_uri: REDIRECT_URI.to_string(),
+    });
+    store.save()?;
+    Ok(auth_url)
+}
+
+/// Headless step 2: exchange the pasted code (`code#state`, URL, or bare code).
+pub async fn finish_login(store: &mut Store, pasted: &str) -> Result<()> {
+    let pending = store
+        .claude
+        .pending
+        .clone()
+        .ok_or_else(|| anyhow!("brak rozpoczętego logowania — najpierw `login --no-browser`"))?;
+    let (code, got_state) = extract_code(pasted);
+    let state = got_state.unwrap_or_else(|| pending.state.clone());
+    let creds = exchange(&code, &state, &pending.verifier).await?;
+    store.claude.credentials = Some(creds);
+    store.claude.pending = None;
+    store.save()?;
+    Ok(())
+}
+
+/// Interactive login (local use): open the browser and read the pasted code.
+pub async fn login(store: &mut Store) -> Result<()> {
+    let auth_url = start_headless(store)?;
     println!("Otwieram przeglądarkę, aby zalogować się do Claude…");
     println!("Jeśli nic się nie otworzyło, wklej ten adres ręcznie:\n\n{auth_url}\n");
     let _ = open::that(&auth_url);
 
-    println!(
-        "Po zalogowaniu zobaczysz kod autoryzacyjny. Skopiuj go i wklej tutaj."
-    );
+    println!("Po zalogowaniu zobaczysz kod autoryzacyjny. Skopiuj go i wklej tutaj.");
     print!("Kod: ");
     std::io::stdout().flush()?;
     let mut line = String::new();
     std::io::stdin().read_line(&mut line)?;
-    let line = line.trim();
+    let line = line.trim().to_string();
     anyhow::ensure!(!line.is_empty(), "nie podano kodu");
 
-    // The pasted value is usually "<code>#<state>".
-    let (code, ret_state) = match line.split_once('#') {
-        Some((c, s)) => (c, s),
-        None => (line, state.as_str()),
-    };
-
-    let creds = exchange(code, ret_state, &verifier).await?;
-    store.claude.credentials = Some(creds);
-    store.save()?;
+    finish_login(store, &line).await?;
     println!("✓ Zalogowano do Claude. Tokeny zapisane lokalnie.");
     Ok(())
 }

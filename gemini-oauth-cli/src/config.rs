@@ -26,6 +26,16 @@ impl Credentials {
     }
 }
 
+/// In-flight OAuth state, persisted between a headless `login --no-browser`
+/// (which generates the URL) and the later `login --code` (which exchanges it).
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct PendingAuth {
+    /// PKCE verifier (Claude). Empty for the Gemini client-secret flow.
+    pub verifier: String,
+    pub state: String,
+    pub redirect_uri: String,
+}
+
 /// Per-provider persisted state.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct ProviderStore {
@@ -33,6 +43,8 @@ pub struct ProviderStore {
     /// Code Assist `cloudaicompanionProject` id (Gemini only).
     #[serde(default)]
     pub project_id: Option<String>,
+    #[serde(default)]
+    pub pending: Option<PendingAuth>,
 }
 
 /// Everything we cache between runs, keyed by provider.
@@ -42,6 +54,25 @@ pub struct Store {
     pub gemini: ProviderStore,
     #[serde(default)]
     pub claude: ProviderStore,
+}
+
+/// Extract an authorization `code` (and optional `state`) from whatever the
+/// user pasted: a full redirect URL, a `code#state` string, or a bare code.
+pub fn extract_code(input: &str) -> (String, Option<String>) {
+    let s = input.trim();
+    // Full URL or query fragment containing code=...
+    if let Some(q) = s.split('?').nth(1).or_else(|| s.contains("code=").then_some(s)) {
+        let params: std::collections::HashMap<String, String> =
+            url::form_urlencoded::parse(q.as_bytes()).into_owned().collect();
+        if let Some(code) = params.get("code") {
+            return (code.clone(), params.get("state").cloned());
+        }
+    }
+    // "code#state" form (Claude console copy page).
+    if let Some((code, state)) = s.split_once('#') {
+        return (code.to_string(), Some(state.to_string()));
+    }
+    (s.to_string(), None)
 }
 
 pub fn now_secs() -> u64 {

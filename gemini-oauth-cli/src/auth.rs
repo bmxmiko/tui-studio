@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-use crate::config::{now_secs, Credentials, Store};
+use crate::config::{extract_code, now_secs, Credentials, PendingAuth, Store};
 
 /// Public OAuth client credentials used by the official gemini-cli. These are
 /// not secret in the usual sense — they are embedded in a distributed,
@@ -55,7 +55,35 @@ const SCOPES: &[&str] = &[
     "openid",
 ];
 
-/// Run the interactive login and persist the resulting credentials.
+// Redirect used by the headless flow. No server listens on it; the user just
+// reads the `code` from the browser address bar after the page fails to load.
+const HEADLESS_REDIRECT: &str = "http://localhost:8765";
+
+fn random_state() -> String {
+    let mut rng = rand::thread_rng();
+    (0..24)
+        .map(|_| rng.sample(rand::distributions::Alphanumeric) as char)
+        .collect()
+}
+
+fn build_auth_url(redirect_uri: &str, state: &str) -> Result<String> {
+    let scope = SCOPES.join(" ");
+    let client_id = client_id();
+    Ok(format!(
+        "{AUTH_ENDPOINT}?{}",
+        serde_urlencoded::to_string([
+            ("client_id", client_id.as_str()),
+            ("redirect_uri", redirect_uri),
+            ("response_type", "code"),
+            ("scope", scope.as_str()),
+            ("state", state),
+            ("access_type", "offline"),
+            ("prompt", "consent"),
+        ])?
+    ))
+}
+
+/// Run the interactive loopback login and persist the resulting credentials.
 pub async fn login(store: &mut Store) -> Result<()> {
     // Bind first so we know which port to put in the redirect URI.
     let listener = TcpListener::bind("127.0.0.1:0")
@@ -63,28 +91,8 @@ pub async fn login(store: &mut Store) -> Result<()> {
         .context("binding loopback server for OAuth redirect")?;
     let port = listener.local_addr()?.port();
     let redirect_uri = format!("http://127.0.0.1:{port}");
-
-    let state: String = {
-        let mut rng = rand::thread_rng();
-        (0..24)
-            .map(|_| rng.sample(rand::distributions::Alphanumeric) as char)
-            .collect()
-    };
-
-    let scope = SCOPES.join(" ");
-    let client_id = client_id();
-    let auth_url = format!(
-        "{AUTH_ENDPOINT}?{}",
-        serde_urlencoded::to_string([
-            ("client_id", client_id.as_str()),
-            ("redirect_uri", redirect_uri.as_str()),
-            ("response_type", "code"),
-            ("scope", scope.as_str()),
-            ("state", state.as_str()),
-            ("access_type", "offline"),
-            ("prompt", "consent"),
-        ])?
-    );
+    let state = random_state();
+    let auth_url = build_auth_url(&redirect_uri, &state)?;
 
     println!("Otwieram przeglądarkę, aby zalogować się do Google…");
     println!("Jeśli nic się nie otworzyło, wklej ten adres ręcznie:\n\n{auth_url}\n");
@@ -99,6 +107,41 @@ pub async fn login(store: &mut Store) -> Result<()> {
     store.gemini.credentials = Some(creds);
     store.save()?;
     println!("✓ Zalogowano. Tokeny zapisane lokalnie.");
+    Ok(())
+}
+
+/// Headless step 1: generate the auth URL and stash the pending state. The user
+/// completes consent in any browser, then pastes the `code` back via
+/// `finish_login`.
+pub fn start_headless(store: &mut Store) -> Result<String> {
+    let state = random_state();
+    let auth_url = build_auth_url(HEADLESS_REDIRECT, &state)?;
+    store.gemini.pending = Some(PendingAuth {
+        verifier: String::new(),
+        state,
+        redirect_uri: HEADLESS_REDIRECT.to_string(),
+    });
+    store.save()?;
+    Ok(auth_url)
+}
+
+/// Headless step 2: exchange the pasted code (or redirect URL) for tokens.
+pub async fn finish_login(store: &mut Store, pasted: &str) -> Result<()> {
+    let pending = store
+        .gemini
+        .pending
+        .clone()
+        .ok_or_else(|| anyhow!("brak rozpoczętego logowania — najpierw `login --no-browser`"))?;
+    let (code, got_state) = extract_code(pasted);
+    if let Some(gs) = got_state {
+        if gs != pending.state {
+            bail!("OAuth state mismatch — przerywam logowanie");
+        }
+    }
+    let creds = exchange_code(&code, &pending.redirect_uri).await?;
+    store.gemini.credentials = Some(creds);
+    store.gemini.pending = None;
+    store.save()?;
     Ok(())
 }
 

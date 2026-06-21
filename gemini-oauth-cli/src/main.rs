@@ -61,7 +61,14 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Zaloguj się (OAuth, otwiera przeglądarkę).
-    Login,
+    Login {
+        /// Tryb bezgłowy: tylko wypisz URL i zapisz stan (nie otwieraj przeglądarki).
+        #[arg(long)]
+        no_browser: bool,
+        /// Dokończ logowanie wklejonym kodem (lub URL-em przekierowania).
+        #[arg(long, value_name = "KOD")]
+        code: Option<String>,
+    },
     /// Usuń zapisane tokeny wybranego dostawcy.
     Logout,
     /// Pokaż stan logowania obu dostawców.
@@ -124,10 +131,9 @@ async fn run() -> Result<()> {
     let mut store = Store::load()?;
 
     match cli.command {
-        Command::Login => match provider {
-            ProviderKind::Gemini => auth::login(&mut store).await?,
-            ProviderKind::Claude => claude::login(&mut store).await?,
-        },
+        Command::Login { no_browser, code } => {
+            login(provider, &mut store, no_browser, code).await?
+        }
         Command::Logout => {
             match provider {
                 ProviderKind::Gemini => store.gemini = Default::default(),
@@ -166,6 +172,52 @@ async fn run() -> Result<()> {
         }
     }
     Ok(())
+}
+
+async fn login(
+    provider: ProviderKind,
+    store: &mut Store,
+    no_browser: bool,
+    code: Option<String>,
+) -> Result<()> {
+    // Step 2: finish with a pasted code.
+    if let Some(code) = code {
+        match provider {
+            ProviderKind::Gemini => auth::finish_login(store, &code).await?,
+            ProviderKind::Claude => claude::finish_login(store, &code).await?,
+        }
+        println!("✓ Zalogowano ({}). Tokeny zapisane lokalnie.", provider.name());
+        return Ok(());
+    }
+
+    // Headless step 1: print URL, save pending, don't block.
+    if no_browser {
+        let url = match provider {
+            ProviderKind::Gemini => auth::start_headless(store)?,
+            ProviderKind::Claude => claude::start_headless(store)?,
+        };
+        println!("Otwórz ten adres w przeglądarce (np. na telefonie) i zaloguj się:\n\n{url}\n");
+        match provider {
+            ProviderKind::Claude => println!(
+                "Po zatwierdzeniu skopiuj wyświetlony kod autoryzacyjny."
+            ),
+            ProviderKind::Gemini => println!(
+                "Strona przekierowania (localhost) się nie wczyta — skopiuj z paska adresu\n\
+                 cały URL `http://localhost:8765/?code=...` albo samą wartość `code`."
+            ),
+        }
+        println!(
+            "Następnie dokończ:  gemini -p {} login --code \"<WKLEJONY_KOD>\"",
+            match provider { ProviderKind::Gemini => "gemini", ProviderKind::Claude => "claude" }
+        );
+        return Ok(());
+    }
+
+    // Interactive (local machine with a browser).
+    match provider {
+        ProviderKind::Gemini => auth::login(store).await,
+        ProviderKind::Claude => claude::login(store).await,
+    }
 }
 
 async fn make_client(provider: ProviderKind, store: &mut Store) -> Result<Client> {
