@@ -96,7 +96,7 @@ pub async fn login(store: &mut Store) -> Result<()> {
     }
 
     let creds = exchange_code(&code, &redirect_uri).await?;
-    store.credentials = Some(creds);
+    store.gemini.credentials = Some(creds);
     store.save()?;
     println!("✓ Zalogowano. Tokeny zapisane lokalnie.");
     Ok(())
@@ -231,14 +231,15 @@ async fn refresh(creds: &Credentials) -> Result<Credentials> {
 /// Return a valid access token, refreshing and persisting if needed.
 pub async fn valid_access_token(store: &mut Store) -> Result<String> {
     let creds = store
+        .gemini
         .credentials
         .clone()
-        .ok_or_else(|| anyhow!("nie jesteś zalogowany — uruchom `gemini login`"))?;
+        .ok_or_else(|| anyhow!("nie jesteś zalogowany (Gemini) — uruchom `gemini login`"))?;
 
     if creds.is_expired() {
         let refreshed = refresh(&creds).await?;
         let token = refreshed.access_token.clone();
-        store.credentials = Some(refreshed);
+        store.gemini.credentials = Some(refreshed);
         store.save()?;
         Ok(token)
     } else {

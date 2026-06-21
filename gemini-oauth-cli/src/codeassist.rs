@@ -39,11 +39,11 @@ impl CodeAssist {
             .user_agent("gemini-oauth-cli/0.1 (rust)")
             .build()?;
 
-        let project_id = match store.project_id.clone() {
+        let project_id = match store.gemini.project_id.clone() {
             Some(p) => p,
             None => {
                 let p = discover_project(&http, &token).await?;
-                store.project_id = Some(p.clone());
+                store.gemini.project_id = Some(p.clone());
                 store.save()?;
                 p
             }

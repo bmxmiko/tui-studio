@@ -46,15 +46,6 @@ pub struct Content {
     pub parts: Vec<Part>,
 }
 
-impl Content {
-    pub fn user_parts(parts: Vec<Part>) -> Self {
-        Content { role: "user".into(), parts }
-    }
-    pub fn model(text: impl Into<String>) -> Self {
-        Content { role: "model".into(), parts: vec![Part::text(text)] }
-    }
-}
-
 /// Controls the model's internal reasoning ("thinking") for Gemini 2.5.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

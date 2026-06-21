@@ -1,23 +1,30 @@
 # gemini-oauth-cli
 
-Klient CLI do **Google Gemini** napisany w Rust, który używa **tylko logowania
-OAuth** (zwykłe konto Google) — **bez API key**. Pod spodem korzysta z tego
-samego backendu **Code Assist** (`cloudcode-pa.googleapis.com`), z którego
-korzysta oficjalne, otwartoźródłowe `gemini-cli`. Dzięki temu zalogowanie się
-przez przeglądarkę wystarcza, by wołać model „jak API”.
+Klient CLI w Rust do **Google Gemini** **oraz Anthropic Claude**, który używa
+**tylko logowania OAuth** — **bez API key**. Gemini działa przez backend
+**Code Assist** (jak `gemini-cli`); Claude przez przepływ OAuth **Claude Code**
+(subskrypcja Pro/Max). Wybór dostawcy flagą `-p/--provider` (`gemini` domyślnie,
+albo `claude`).
 
-> To jest klient interoperacyjny do prywatnego użytku z własnym kontem Google.
-> Obowiązują Cię warunki korzystania z usług Google / Gemini.
+> Klient interoperacyjny do prywatnego użytku z **własnym** kontem.
+> Obowiązują Cię warunki korzystania z usług Google / Anthropic.
+
+> ⚠️ **Uwaga o Claude:** dostęp do Messages API przez OAuth Claude Code wymaga
+> nagłówka beta `oauth-2025-04-20` oraz tożsamości „You are Claude Code” jako
+> pierwszego bloku systemowego. Anthropic **aktywnie ogranicza** użycie OAuth
+> przez klientów innych niż Claude Code — ten tryb jest znacznie bardziej kruchy
+> niż Gemini i może przestać działać lub naruszać ToS. Używaj świadomie.
 
 ## Funkcje
 
-- ✅ Logowanie **OAuth** (bez API key), automatyczne odświeżanie tokenu
-- ✅ **Zmiana modelu** (`-m`, np. `gemini-2.5-flash`, `gemini-2.5-pro`)
-- ✅ **Upload plików** — obrazy / PDF / tekst (`-f`, `inlineData` base64)
+- ✅ Logowanie **OAuth** (bez API key), automatyczne odświeżanie tokenu — Gemini i Claude
+- ✅ **Wybór dostawcy** (`-p gemini` / `-p claude`)
+- ✅ **Zmiana modelu** (`-m`, np. `gemini-2.5-pro`, `claude-sonnet-4-5`)
+- ✅ **Upload plików** — obrazy / PDF / tekst (base64; `inlineData` / bloki `image`/`document`)
 - ✅ **Poziom myślenia** (`--thinking`) + podgląd toku rozumowania (`--show-thoughts`)
 - ✅ Streaming odpowiedzi (SSE) oraz tryb pipe (stdin) „jak API”
 - ✅ Interaktywny czat z pamięcią kontekstu i dołączaniem plików
-- ❌ Deep Research — to funkcja aplikacji Gemini, niedostępna przez ten endpoint
+- ❌ Deep Research — funkcja aplikacji webowych, niedostępna przez te endpointy
 
 ## Jak to działa
 
@@ -32,7 +39,13 @@ przez przeglądarkę wystarcza, by wołać model „jak API”.
    `:streamGenerateContent` w kopercie `{ model, project, request }`, a
    odpowiedź jest rozpakowywana z `{ "response": ... }`.
 
-Tokeny i cache projektu zapisywane są w `~/.config/gemini-oauth-cli/store.json`
+Dla **Claude** flow jest inny: `gemini -p claude login` używa OAuth 2.0 z PKCE
+(klient Claude Code), otwiera ekran zgody i prosi o **wklejenie kodu**
+autoryzacyjnego. Następnie żądania idą do `https://api.anthropic.com/v1/messages`
+z `Authorization: Bearer`, nagłówkiem `anthropic-beta: oauth-2025-04-20,…`
+i tożsamością Claude Code w prompcie systemowym.
+
+Tokeny obu dostawców zapisywane są w `~/.config/gemini-oauth-cli/store.json`
 (uprawnienia `0600` na Unix).
 
 ## Budowanie
@@ -68,11 +81,31 @@ echo "Streść ten tekst:" | cat - artykul.txt | gemini ask --no-stream
 # interaktywny czat z pamięcią kontekstu (z myśleniem)
 gemini chat -m gemini-2.5-pro --thinking -1 --show-thoughts
 
-# stan logowania / wykryty projekt
+# stan logowania obu dostawców
 gemini status
 
-# wyloguj (usuwa lokalne tokeny i cache)
-gemini logout
+# wyloguj wybranego dostawcę (usuwa jego tokeny)
+gemini logout              # gemini
+gemini -p claude logout    # claude
+```
+
+### Claude (`-p claude`)
+
+```bash
+# logowanie OAuth (PKCE, wklejasz kod autoryzacyjny ze strony)
+gemini -p claude login
+
+# pytanie (domyślny model: claude-sonnet-4-5)
+gemini -p claude ask "Napisz haiku o Rust"
+
+# inny model + analiza pliku
+gemini -p claude ask -m claude-opus-4-1 -f zrzut.png "Co tu nie gra?"
+
+# extended thinking (budżet >0 włącza, min 1024) + podgląd rozumowania
+gemini -p claude ask --thinking 4096 --show-thoughts "Rozwiąż tę zagadkę: ..."
+
+# czat
+gemini -p claude chat
 ```
 
 ### Komendy w trybie `chat`

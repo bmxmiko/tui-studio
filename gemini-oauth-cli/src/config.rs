@@ -1,19 +1,17 @@
-//! On-disk configuration: stored OAuth credentials and the cached Code Assist
-//! project id. Everything lives under the user's config dir, e.g.
-//! `~/.config/gemini-oauth-cli/`.
+//! On-disk configuration: stored OAuth credentials per provider plus the
+//! cached Code Assist project id (Gemini only). Everything lives under the
+//! user's config dir, e.g. `~/.config/gemini-oauth-cli/`.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Persisted OAuth tokens. Mirrors the subset of a Google token response we
-/// care about, plus an absolute expiry timestamp so we know when to refresh.
+/// Persisted OAuth tokens. Shared shape across providers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Credentials {
     pub access_token: String,
-    /// Refresh tokens are only handed out on the first consent (we request
-    /// `access_type=offline` + `prompt=consent`), so we keep it around.
+    /// Refresh tokens let us mint new access tokens without re-consent.
     pub refresh_token: String,
     /// Unix epoch seconds at which `access_token` stops being valid.
     pub expiry: u64,
@@ -24,17 +22,26 @@ pub struct Credentials {
 impl Credentials {
     /// True when the access token is expired (or about to be, within 60s).
     pub fn is_expired(&self) -> bool {
-        let now = now_secs();
-        now + 60 >= self.expiry
+        now_secs() + 60 >= self.expiry
     }
 }
 
-/// Everything we cache between runs.
+/// Per-provider persisted state.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct ProviderStore {
+    pub credentials: Option<Credentials>,
+    /// Code Assist `cloudaicompanionProject` id (Gemini only).
+    #[serde(default)]
+    pub project_id: Option<String>,
+}
+
+/// Everything we cache between runs, keyed by provider.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Store {
-    pub credentials: Option<Credentials>,
-    /// The Code Assist `cloudaicompanionProject` id discovered during onboarding.
-    pub project_id: Option<String>,
+    #[serde(default)]
+    pub gemini: ProviderStore,
+    #[serde(default)]
+    pub claude: ProviderStore,
 }
 
 pub fn now_secs() -> u64 {
@@ -79,14 +86,6 @@ impl Store {
         {
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-        }
-        Ok(())
-    }
-
-    pub fn clear() -> Result<()> {
-        let path = store_path()?;
-        if path.exists() {
-            std::fs::remove_file(&path)?;
         }
         Ok(())
     }
