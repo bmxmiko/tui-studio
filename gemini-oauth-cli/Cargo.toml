@@ -21,6 +21,7 @@ open = "5"
 futures-util = "0.3"
 url = "2"
 rand = "0.8"
+base64 = "0.22"
 
 [profile.release]
 opt-level = "z"

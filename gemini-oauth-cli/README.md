@@ -9,6 +9,16 @@ przez przeglądarkę wystarcza, by wołać model „jak API”.
 > To jest klient interoperacyjny do prywatnego użytku z własnym kontem Google.
 > Obowiązują Cię warunki korzystania z usług Google / Gemini.
 
+## Funkcje
+
+- ✅ Logowanie **OAuth** (bez API key), automatyczne odświeżanie tokenu
+- ✅ **Zmiana modelu** (`-m`, np. `gemini-2.5-flash`, `gemini-2.5-pro`)
+- ✅ **Upload plików** — obrazy / PDF / tekst (`-f`, `inlineData` base64)
+- ✅ **Poziom myślenia** (`--thinking`) + podgląd toku rozumowania (`--show-thoughts`)
+- ✅ Streaming odpowiedzi (SSE) oraz tryb pipe (stdin) „jak API”
+- ✅ Interaktywny czat z pamięcią kontekstu i dołączaniem plików
+- ❌ Deep Research — to funkcja aplikacji Gemini, niedostępna przez ten endpoint
+
 ## Jak to działa
 
 1. **OAuth (loopback)** — `gemini login` uruchamia lokalny serwer na
@@ -44,11 +54,19 @@ gemini ask "Wyjaśnij borrow checker w jednym zdaniu"
 # wybór modelu + instrukcja systemowa + temperatura
 gemini ask -m gemini-2.5-pro -s "Odpowiadaj po polsku, zwięźle" -t 0.2 "Co to jest WAL?"
 
+# upload plików (obraz / PDF / tekst) — można podać wiele -f
+gemini ask -f diagram.png -f notatki.pdf "Co przedstawiają te pliki?"
+gemini ask -f zrzut.png    # sam plik, bez promptu też zadziała
+
+# poziom myślenia (Gemini 2.5): budżet tokenów + podgląd toku rozumowania
+gemini ask -m gemini-2.5-pro --thinking 8192 --show-thoughts "Rozwiąż tę zagadkę logiczną: ..."
+gemini ask --thinking 0 "Szybka odpowiedź bez myślenia"   # 0 = wyłącz, -1 = dynamiczny
+
 # użycie w pipe (jak API) — prompt ze stdin
 echo "Streść ten tekst:" | cat - artykul.txt | gemini ask --no-stream
 
-# interaktywny czat z pamięcią kontekstu
-gemini chat -m gemini-2.5-pro
+# interaktywny czat z pamięcią kontekstu (z myśleniem)
+gemini chat -m gemini-2.5-pro --thinking -1 --show-thoughts
 
 # stan logowania / wykryty projekt
 gemini status
@@ -58,6 +76,7 @@ gemini logout
 ```
 
 ### Komendy w trybie `chat`
+- `/file <ścieżka>` — dołącz plik do następnej wiadomości
 - `/reset` — wyczyść kontekst rozmowy
 - `/exit` lub `/quit` — wyjście
 

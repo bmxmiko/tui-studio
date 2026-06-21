@@ -88,11 +88,14 @@ impl CodeAssist {
     }
 
     /// Streaming generation; prints text chunks to stdout as they arrive and
-    /// returns the full concatenated text.
+    /// returns the full concatenated answer text. Reasoning ("thought") parts
+    /// are printed dimmed only when `show_thoughts` is set, and are never part
+    /// of the returned answer.
     pub async fn stream(
         &self,
         model: &str,
         request: &GenerateContentRequest,
+        show_thoughts: bool,
     ) -> Result<String> {
         let url = format!("{BASE}:streamGenerateContent?alt=sse");
         let resp = self
@@ -114,6 +117,9 @@ impl CodeAssist {
         let mut buf = String::new();
         let mut stream = resp.bytes_stream();
         let stdout = std::io::stdout();
+        // Track whether we're inside the dimmed "thoughts" section so we can
+        // print a header once and reset styling when the answer begins.
+        let mut in_thoughts = false;
 
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.context("reading SSE stream")?;
@@ -131,16 +137,41 @@ impl CodeAssist {
                 if data.is_empty() || data == "[DONE]" {
                     continue;
                 }
-                if let Ok(wrapped) = serde_json::from_str::<Wrapped<GenerateContentResponse>>(data) {
-                    let piece = wrapped.response.text();
-                    if !piece.is_empty() {
-                        full.push_str(&piece);
-                        let mut lock = stdout.lock();
-                        let _ = lock.write_all(piece.as_bytes());
-                        let _ = lock.flush();
+                let Ok(wrapped) =
+                    serde_json::from_str::<Wrapped<GenerateContentResponse>>(data)
+                else {
+                    continue;
+                };
+
+                let mut lock = stdout.lock();
+                for (is_thought, piece) in wrapped.response.text_segments() {
+                    if piece.is_empty() {
+                        continue;
                     }
+                    if is_thought {
+                        if !show_thoughts {
+                            continue;
+                        }
+                        if !in_thoughts {
+                            let _ = lock.write_all(b"\x1b[2m\xf0\x9f\x92\xad thinking:\n");
+                            in_thoughts = true;
+                        }
+                        let _ = lock.write_all(piece.as_bytes());
+                    } else {
+                        if in_thoughts {
+                            // Close the dimmed section before the real answer.
+                            let _ = lock.write_all(b"\x1b[0m\n\n");
+                            in_thoughts = false;
+                        }
+                        full.push_str(&piece);
+                        let _ = lock.write_all(piece.as_bytes());
+                    }
+                    let _ = lock.flush();
                 }
             }
+        }
+        if in_thoughts {
+            print!("\x1b[0m");
         }
         println!();
         Ok(full)

@@ -4,15 +4,39 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Inline (base64-encoded) file payload — images, PDFs, text, etc.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InlineData {
+    #[serde(rename = "mimeType")]
+    pub mime_type: String,
+    /// Base64-encoded bytes.
+    pub data: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Part {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    #[serde(rename = "inlineData", skip_serializing_if = "Option::is_none")]
+    pub inline_data: Option<InlineData>,
+    /// Present on response parts when the model returns its reasoning
+    /// ("thoughts"); we never send this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thought: Option<bool>,
 }
 
 impl Part {
     pub fn text(s: impl Into<String>) -> Self {
-        Part { text: Some(s.into()) }
+        Part { text: Some(s.into()), ..Default::default() }
+    }
+    pub fn inline(mime_type: impl Into<String>, data: impl Into<String>) -> Self {
+        Part {
+            inline_data: Some(InlineData { mime_type: mime_type.into(), data: data.into() }),
+            ..Default::default()
+        }
+    }
+    pub fn is_thought(&self) -> bool {
+        self.thought.unwrap_or(false)
     }
 }
 
@@ -23,12 +47,24 @@ pub struct Content {
 }
 
 impl Content {
-    pub fn user(text: impl Into<String>) -> Self {
-        Content { role: "user".into(), parts: vec![Part::text(text)] }
+    pub fn user_parts(parts: Vec<Part>) -> Self {
+        Content { role: "user".into(), parts }
     }
     pub fn model(text: impl Into<String>) -> Self {
         Content { role: "model".into(), parts: vec![Part::text(text)] }
     }
+}
+
+/// Controls the model's internal reasoning ("thinking") for Gemini 2.5.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThinkingConfig {
+    /// Token budget for reasoning. `-1` = dynamic, `0` = disabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_budget: Option<i32>,
+    /// Ask the backend to return the reasoning as `thought` parts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub include_thoughts: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -40,6 +76,8 @@ pub struct GenerationConfig {
     pub top_p: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_config: Option<ThinkingConfig>,
 }
 
 /// The inner Gemini request (the part Code Assist wraps).
@@ -71,18 +109,38 @@ pub struct GenerateContentResponse {
 }
 
 impl GenerateContentResponse {
-    /// Concatenate all text parts of the first candidate.
-    pub fn text(&self) -> String {
+    fn parts(&self) -> &[Part] {
         self.candidates
             .first()
             .and_then(|c| c.content.as_ref())
-            .map(|content| {
-                content
-                    .parts
-                    .iter()
-                    .filter_map(|p| p.text.clone())
-                    .collect::<String>()
-            })
-            .unwrap_or_default()
+            .map(|content| content.parts.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Text segments of the first candidate, tagged with whether each is a
+    /// reasoning ("thought") part. Order is preserved.
+    pub fn text_segments(&self) -> Vec<(bool, String)> {
+        self.parts()
+            .iter()
+            .filter_map(|p| p.text.as_ref().map(|t| (p.is_thought(), t.clone())))
+            .collect()
+    }
+
+    /// Just the answer text (excludes reasoning parts).
+    pub fn answer_text(&self) -> String {
+        self.parts()
+            .iter()
+            .filter(|p| !p.is_thought())
+            .filter_map(|p| p.text.clone())
+            .collect()
+    }
+
+    /// Just the reasoning text, if any was returned.
+    pub fn thought_text(&self) -> String {
+        self.parts()
+            .iter()
+            .filter(|p| p.is_thought())
+            .filter_map(|p| p.text.clone())
+            .collect()
     }
 }
